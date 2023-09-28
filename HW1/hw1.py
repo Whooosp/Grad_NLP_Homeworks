@@ -22,7 +22,7 @@ def load_corpus(corpus_path):
             line = line.strip()
             text, label = line.split('\t')
             snippets = text.split()
-            corpus.append((snippets, label))
+            corpus.append((snippets, int(label)))
     return corpus
 
 
@@ -48,7 +48,7 @@ def tag_negation(snippet):
         word, tag = item
         if is_negation(word):
             if i == len(tagged_snippet) - 1 or tagged_snippet[i + 1][0] != 'only':
-                negating = True
+                negating = not negating
                 new_snippet.append(word)
                 continue
         if word in sentence_enders | negation_enders or tag in ['JJR', 'RBR']:
