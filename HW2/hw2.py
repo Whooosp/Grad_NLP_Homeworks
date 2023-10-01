@@ -3,10 +3,13 @@ import sys
 import nltk
 
 from nltk.corpus import brown
-import numpy
+import numpy as np
 from scipy.sparse import csr_matrix
 from sklearn.linear_model import LogisticRegression
-from typing import List
+from typing import List, Set, Dict
+
+nltk.download('universal_tagset')
+nltk.download('brown')
 
 
 # Load the Brown corpus with Universal Dependencies tags
@@ -16,7 +19,7 @@ def load_training_corpus(proportion=1.0):
     brown_sentences = brown.tagged_sents(tagset='universal')
     num_used = int(proportion * len(brown_sentences))
 
-    corpus_sents, corpus_tags = [None] * num_used, [None] * num_used
+    corpus_sents, corpus_tags = [[]] * num_used, [[]] * num_used
     for i in range(num_used):
         corpus_sents[i], corpus_tags[i] = zip(*brown_sentences[i])
     return corpus_sents, corpus_tags
@@ -72,45 +75,83 @@ def get_word_features(word: str) -> List[str]:
 # Returns a list of strings
 def get_features(words: List[str], i: int, prevtag: str) -> List[str]:
     ngram_features = [s.lower() for s in get_ngram_features(words, i)]
+    # print(words[i])
     word_features = [s if 'wordshape' in s else s.lower() for s in get_word_features(words[i])]
-    return ngram_features+word_features+[f'tagbigram-{prevtag.lower()}']
+    return ngram_features + word_features + [f'tagbigram-{prevtag.lower()}']
 
 
 # Remove features that occur fewer than a given threshold number of time corpus_features is a list of lists,
 # where each sublist corresponds to a sentence and has elements that are lists of strings (feature names) threshold
 # is an int Returns a tuple (corpus_features, common_features)
-def remove_rare_features(corpus_features, threshold=5):
-    pass
+def remove_rare_features(corpus_features: List[List[List[str]]], threshold: int = 5):
+    feat_counts = {}
+    for sent in corpus_features:
+        for word in sent:
+            for feature in word:
+                if feature not in feat_counts:
+                    feat_counts[feature] = 1
+                else:
+                    feat_counts[feature] += 1
+    rare_features = set(feat for feat in feat_counts if feat_counts[feat] < threshold)
+    common_features = set(feat for feat in feat_counts if feat_counts[feat] >= threshold)
+    new_corpus_features = [[[feat for feat in word if feat in common_features] for word in sent]
+                           for sent in corpus_features]
+    return new_corpus_features, common_features
 
 
 # Build feature and tag dictionaries
 # common_features is a set of strings
 # corpus_tags is a list of lists of strings (tags)
 # Returns a tuple (feature_dict, tag_dict)
-def get_feature_and_label_dictionaries(common_features, corpus_tags):
-    pass
+def get_feature_and_label_dictionaries(common_features: Set[str], corpus_tags: List[List[str]]):
+    feature_dictionary = {feat: i for i, feat in enumerate(common_features)}
+    tag_dictionary = {tag: i for i, tag in enumerate(set(sum((list(tags) for tags in corpus_tags), [])))}
+    return feature_dictionary, tag_dictionary
 
 
 # Build the label vector Y
 # corpus_tags is a list of lists of strings (tags)
 # tag_dict is a dictionary {string: int}
 # Returns a Numpy array
-def build_Y(corpus_tags, tag_dict):
-    pass
+def build_Y(corpus_tags: List[List[str]], tag_dict: Dict[str, int]):
+    return np.array([tag_dict[tag] for tag in sum((list(tags) for tags in corpus_tags), [])])
 
 
 # Build a sparse input matrix X corpus_features is a list of lists, where each sublist corresponds to a sentence and
 # has elements that are lists of strings (feature names) feature_dict is a dictionary {string: int} Returns a
 # Scipy.sparse csr_matrix
 def build_X(corpus_features, feature_dict):
-    pass
+    rows, cols = [], []
+    ind = 0
+    for i in range(len(corpus_features)):
+        for j in range(len(corpus_features[i])):
+
+            for feat in corpus_features[i][j]:
+                rows.append(ind)
+                cols.append(feature_dict[feat])
+            ind += 1
+    values = [1 for _ in rows]
+    rows, cols, values = np.array(rows), np.array(cols), np.array(values)
+    return csr_matrix((values, (rows, cols)))
 
 
 # Train an MEMM tagger on the Brown corpus
 # proportion is a float
 # Returns a tuple (model, feature_dict, tag_dict)
 def train(proportion=1.0):
-    pass
+    corpus_sents, corpus_tags = load_training_corpus(proportion)
+    # print(corpus_sents)
+    corpus_features = [[get_features(corpus_sents[i], j, corpus_tags[i][j-1] if j > 0 else '<S>')
+                        for j in range(len(corpus_sents[i]))] for i in range(len(corpus_sents))]
+    corpus_features, common_features = remove_rare_features(corpus_features)
+    feat_dict, tag_dict = get_feature_and_label_dictionaries(common_features, corpus_tags)
+    # print(feat_dict)
+    X_train, y_train = build_X(corpus_features, feat_dict), build_Y(corpus_tags, tag_dict)
+    log_reg = LogisticRegression(class_weight='balanced', solver='saga', multi_class='multinomial')
+
+    log_reg.fit(X_train, y_train)
+
+    return log_reg, feat_dict, tag_dict
 
 
 # Load the test set
@@ -129,7 +170,17 @@ def load_test_corpus(corpus_path):
 # reverse_tag_dict is a dictionary {int: string}
 # Returns a tuple (Y_start, Y_pred)
 def get_predictions(test_sent, model, feature_dict, reverse_tag_dict):
-    pass
+    n, T = len(test_sent[0]), len(reverse_tag_dict)
+    Y_pred = np.empty((n-1, T, T))
+    for i in range(1, n):
+        features = [[get_features(test_sent[0], i, t) for t in reverse_tag_dict.values()]]
+        print(features)
+        X_test = build_X(features, feature_dict)
+        Y_pred[i-1] = model.predict_log_proba(X_test)
+    features = [[get_features(test_sent[0], 0, '<S>')]]
+    X_start = build_X(features, feature_dict)
+    Y_start = model.predict_log_proba(X_start)
+    return Y_start, Y_pred
 
 
 # Perform Viterbi decoding using predicted log probabilities
@@ -137,6 +188,15 @@ def get_predictions(test_sent, model, feature_dict, reverse_tag_dict):
 # Y_pred is a Numpy array of size (n-1, T, T)
 # Returns a list of strings (tags)
 def viterbi(Y_start, Y_pred):
+    n, T = Y_pred.shape[0]+1, Y_pred.shape[1]
+    V, BP = np.empty((n, T)), np.empty((n, T))
+    V[0] = Y_start[0]
+    BP[1] = [np.argmax(V[0].dot(Y_pred[0][t])) for t in range(T)]
+    print(f'Y_preds: {Y_pred}')
+    print(f'V: {V}')
+    print(f'BP: {BP}')
+    # for i in range(1, n):
+    #     BP[i] = [np.argmax(V[i-1].dot(Y_pred[i-1][t])) for t in range(T)]
     pass
 
 
@@ -147,15 +207,21 @@ def viterbi(Y_start, Y_pred):
 # tag_dict is a dictionary {string: int}
 # Returns a list of lists of strings (tags)
 def predict(corpus_path, model, feature_dict, tag_dict):
+    test_corpus = load_test_corpus(corpus_path)
+    reverse_tag_dict = {i: tag for tag, i in tag_dict.items()}
+    sent = [test_corpus[0]]
+    Y_start, Y_pred = get_predictions(sent, model, feature_dict, reverse_tag_dict)
+    viterbi(Y_start, Y_pred)
     pass
 
 
 def main(args):
-    words = ['the', 'Happy', 'cat']
-    print(get_ngram_features(words, 2))
-    print(get_wordshape('HeO2223'))
-    print(get_features(words, 1, 'DT'))
-    # model, feature_dict, tag_dict = train(0.25)
+    # words = ['the', 'Happy', 'cat']
+    # print(get_ngram_features(words, 2))
+    # print(get_wordshape('HeO2223'))
+    # print(get_features(words, 1, 'DT'))
+    model, feature_dict, tag_dict = train(0.25)
+    predict('test.txt', model, feature_dict, tag_dict)
     #
     # predictions = predict('test.txt', model, feature_dict, tag_dict)
     # for test_sent in predictions:
