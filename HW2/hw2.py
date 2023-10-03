@@ -127,12 +127,13 @@ def build_X(corpus_features, feature_dict):
         for j in range(len(corpus_features[i])):
 
             for feat in corpus_features[i][j]:
-                rows.append(ind)
-                cols.append(feature_dict[feat])
+                if feat in feature_dict:
+                    rows.append(ind)
+                    cols.append(feature_dict[feat])
             ind += 1
     values = [1 for _ in rows]
     rows, cols, values = np.array(rows), np.array(cols), np.array(values)
-    return csr_matrix((values, (rows, cols)))
+    return csr_matrix((values, (rows, cols)), shape=(ind, len(feature_dict)))
 
 
 # Train an MEMM tagger on the Brown corpus
@@ -145,7 +146,7 @@ def train(proportion=1.0):
                         for j in range(len(corpus_sents[i]))] for i in range(len(corpus_sents))]
     corpus_features, common_features = remove_rare_features(corpus_features)
     feat_dict, tag_dict = get_feature_and_label_dictionaries(common_features, corpus_tags)
-    # print(feat_dict)
+    # print(tag_dict)
     X_train, y_train = build_X(corpus_features, feat_dict), build_Y(corpus_tags, tag_dict)
     log_reg = LogisticRegression(class_weight='balanced', solver='saga', multi_class='multinomial')
 
@@ -174,7 +175,7 @@ def get_predictions(test_sent, model, feature_dict, reverse_tag_dict):
     Y_pred = np.empty((n-1, T, T))
     for i in range(1, n):
         features = [[get_features(test_sent[0], i, t) for t in reverse_tag_dict.values()]]
-        print(features)
+        # print(features)
         X_test = build_X(features, feature_dict)
         Y_pred[i-1] = model.predict_log_proba(X_test)
     features = [[get_features(test_sent[0], 0, '<S>')]]
@@ -189,15 +190,19 @@ def get_predictions(test_sent, model, feature_dict, reverse_tag_dict):
 # Returns a list of strings (tags)
 def viterbi(Y_start, Y_pred):
     n, T = Y_pred.shape[0]+1, Y_pred.shape[1]
-    V, BP = np.empty((n, T)), np.empty((n, T))
+    V, BP = np.empty((n, T)), np.empty((n, T), dtype=int)
     V[0] = Y_start[0]
-    BP[1] = [np.argmax(V[0].dot(Y_pred[0][t])) for t in range(T)]
-    print(f'Y_preds: {Y_pred}')
-    print(f'V: {V}')
-    print(f'BP: {BP}')
-    # for i in range(1, n):
-    #     BP[i] = [np.argmax(V[i-1].dot(Y_pred[i-1][t])) for t in range(T)]
-    pass
+    # BP[1] = [np.argmax(V[0].dot(Y_pred[0][t])) for t in range(T)]
+    # print(f'Y_preds: {Y_pred}')
+    # print(f'V: {V}')
+    # print(f'BP: {BP}')
+    for i in range(1, n):
+        BP[i] = [int(np.argmax(V[i-1] + Y_pred[i-1, :, t])) for t in range(T)]
+        V[i] = [V[i-1, BP[i, t]] + Y_pred[i-1, BP[i, t], t] for t in range(T)]
+    solution_tags = [np.argmax(V[-1])]
+    for i in reversed(range(n-1)):
+        solution_tags.append(BP[i+1, solution_tags[-1]])
+    return list(reversed(solution_tags))
 
 
 # Predict tags for a test corpus using a trained model
@@ -209,10 +214,14 @@ def viterbi(Y_start, Y_pred):
 def predict(corpus_path, model, feature_dict, tag_dict):
     test_corpus = load_test_corpus(corpus_path)
     reverse_tag_dict = {i: tag for tag, i in tag_dict.items()}
-    sent = [test_corpus[0]]
-    Y_start, Y_pred = get_predictions(sent, model, feature_dict, reverse_tag_dict)
-    viterbi(Y_start, Y_pred)
-    pass
+    solution_tags = []
+    for sent in test_corpus:
+        sent = [sent]
+        Y_start, Y_pred = get_predictions(sent, model, feature_dict, reverse_tag_dict)
+        solution_tags.append([reverse_tag_dict[i] for i in viterbi(Y_start, Y_pred)])
+    # print(sent)
+    # print([reverse_tag_dict[i] for i in solution_tags])
+    return solution_tags
 
 
 def main(args):
@@ -221,11 +230,11 @@ def main(args):
     # print(get_wordshape('HeO2223'))
     # print(get_features(words, 1, 'DT'))
     model, feature_dict, tag_dict = train(0.25)
-    predict('test.txt', model, feature_dict, tag_dict)
+    # predict('test.txt', model, feature_dict, tag_dict)
     #
-    # predictions = predict('test.txt', model, feature_dict, tag_dict)
-    # for test_sent in predictions:
-    #     print(test_sent)
+    predictions = predict('test.txt', model, feature_dict, tag_dict)
+    for test_sent in predictions:
+        print(test_sent)
 
 
 if __name__ == '__main__':
